@@ -34,11 +34,11 @@ int menuIndex = 0;
 // Operator submenu data
 const int OP_COUNT = 5;
 const char* operatorItems[OP_COUNT] = {
-  "1.Machine",
-  "2.Pressure",
-  "3.Temp    ",
-  "4.Maintaince",
-  "5.FaultRepair"
+  "1.Machine    ",
+  "2.Pressure   ",
+  "3.Temperature  ",
+  "4.Maintenance  ",
+  "5.Fault-Repair  "
 };
 int operatorIndex = 0;
 int opStart = 0;
@@ -169,7 +169,7 @@ void loop() {
       lcd.setCursor(0,0);  lcd.print("  OPERATOR  ");
       for (int i=0; i<OP_VISIBLE; i++) {
         int idx = opStart + i;
-        lcd.setCursor(0,1+i);
+        lcd.setCursor(-4,1+i);
         lcd.print(idx==operatorIndex?">":" ");
         lcd.print(operatorItems[idx]);
       }
@@ -199,7 +199,7 @@ void loop() {
 
     lcd.setCursor(0,0);  lcd.print("     MENU       ");
     for (int i=0; i<MENU_COUNT; i++) {
-      lcd.setCursor(0,1+i);
+      lcd.setCursor(-4,1+i);
       lcd.print(i==menuIndex?">":" ");
       lcd.print(menuItems[i]);
     }
@@ -233,17 +233,17 @@ void loop() {
 
   // Draw Home screen
   lcd.setCursor(0,0);
-  lcd.print("Dis.Pres : 00.0 Bar");
+  lcd.print("Dis.Pres:00.0 Bar");
 
   lcd.setCursor(0,1);
-  lcd.print("Dis Temp : 0 C   ");
+  lcd.print("Dis.Temp:0 C");
 
-  lcd.setCursor(0,2);
-  lcd.print("Warning  : ");
-  lcd.print(faultDetected?"Fault   ":"No Fault");
+  lcd.setCursor(-4,2);
+  lcd.print("Warning:");
+  lcd.print(faultDetected?"Fault":"No Fault");
 
-  lcd.setCursor(0,3);
-  lcd.print("Status   : LA   ");
+  lcd.setCursor(-4,3);
+  lcd.print("Status:LA ");
 
   delay(300);
 }
