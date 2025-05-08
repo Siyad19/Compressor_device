@@ -6,7 +6,7 @@ LiquidCrystal_I2C lcd(0x27, 16, 4);
 
 // Pin definitions
 const int pressureSensorPin = PA8;
-const int setpointPin = PA0;
+const int potPin = PA0;
 const int compressorPin = PA1;
 const int alarmPin = PB14;
 const int tempFaultPin = PA9;
@@ -20,10 +20,20 @@ const int selectPin = PA4;
 
 // Screen states
 enum ScreenState { MAIN_SCREEN,
-                   MENU_SCREEN };
+                   MENU_SCREEN,
+};
+
 ScreenState currentScreen = MAIN_SCREEN;
 bool inOperatorMenu = false;
 bool inMachineMenu = false;
+
+bool inPressureMenu = false;
+int pressureSettingIndex = 0;
+const int PRESSURE_OPTIONS = 3;
+
+float loadPressure = 0.0;
+float reloadPressure = 0.0;
+float hspPressure = 0.0;
 
 // Menu data
 const int MENU_COUNT = 3;
@@ -51,7 +61,7 @@ const int OP_VISIBLE = 3;
 
 // Machine options
 struct MachineSettings {
-  bool modeLeft = true;
+  bool mode = true;
   bool autoStart = true;
   bool pressureBar = true;
   bool tempCelsius = true;
@@ -100,18 +110,19 @@ bool unload = false;
 bool stopBusy = false;
 bool ready = false;
 
-bool local = false;
-bool remote = false;
+// bool local = false;
+// bool remote = false;
 
-bool autoStart = false;
-bool unloadMode = false;
- 
+// bool autoStart = false;
+// bool unloadMode = false;
+
 
 String currentWarning = "";
 String currentFault = "";
 String currentStatus = "";
-String currentUpdate1 = "";
-String currentUpdate2 = "";
+// String currentUpdate1 = "";
+// String currentUpdate2 = "";
+
 
 void setup() {
   Wire.begin();
@@ -119,7 +130,7 @@ void setup() {
   lcd.backlight();
 
   pinMode(pressureSensorPin, INPUT);
-  pinMode(setpointPin, INPUT);
+  pinMode(potPin, INPUT);
   pinMode(tempFaultPin, INPUT_PULLUP);
   pinMode(overloadFaultPin, INPUT_PULLUP);
   pinMode(manualStopPin, INPUT_PULLUP);
@@ -211,7 +222,7 @@ void loop() {
       if (sel == LOW && lastSelectState == HIGH && now - lastDebounce > DEBOUNCE) {
         // Toggle the selected option
         switch (machineSettingIndex) {
-          case 0: machineSettings.modeLeft = !machineSettings.modeLeft; break;
+          case 0: machineSettings.mode = !machineSettings.mode; break;
           case 1: machineSettings.autoStart = !machineSettings.autoStart; break;
           case 2: machineSettings.pressureBar = !machineSettings.pressureBar; break;
           case 3: machineSettings.tempCelsius = !machineSettings.tempCelsius; break;
@@ -241,7 +252,7 @@ void loop() {
         switch (idx) {
           case 0:
             lcd.print("Mode: ");
-            lcd.print(machineSettings.modeLeft ? "L         " : "R         ");
+            lcd.print(machineSettings.mode ? "Local     " : "Remote     ");
             break;
           case 1:
             lcd.print("Auto-start: ");
@@ -254,6 +265,98 @@ void loop() {
           case 3:
             lcd.print("Temp: ");
             lcd.print(machineSettings.tempCelsius ? "C          " : "F           ");
+            break;
+        }
+      }
+      return;
+    }
+
+    if (inPressureMenu) {
+      static const int VISIBLE = 3;
+      static int startIdx = 0;
+      static bool adjusting = false;     // Are we adjusting a value?
+      static bool valueChanged = false;  // Did the value actually change?
+
+      // Read buttons at the start
+      bool sel = digitalRead(selectPin);
+      bool nxt = digitalRead(nextPin);
+
+      unsigned long now = millis();  // Ensure you have `now` defined before using
+
+      // Handle Next button press to navigate (only when NOT adjusting)
+      if (!adjusting && nxt == LOW && lastNextState == HIGH && now - lastDebounce > DEBOUNCE) {
+        pressureSettingIndex = (pressureSettingIndex + 1) % PRESSURE_OPTIONS;
+        if (pressureSettingIndex < startIdx) startIdx = pressureSettingIndex;
+        if (pressureSettingIndex >= startIdx + VISIBLE) startIdx = pressureSettingIndex - VISIBLE + 1;
+        lastDebounce = now;
+      }
+      lastNextState = nxt;
+
+      // Handle Select button to toggle adjust mode
+      if (sel == LOW && lastSelectState == HIGH && now - lastDebounce > DEBOUNCE) {
+        adjusting = !adjusting;  // Toggle adjustment mode
+        lastDebounce = now;
+      }
+      lastSelectState = sel;
+
+      // If adjusting, read potentiometer to update selected pressure setting
+      if (adjusting) {
+        int raw = analogRead(potPin);
+        float newValue = map(raw, 0, 4095, 0, 100) / 10.0;  // Example: Adjusting within 0-10 bar range
+
+        switch (pressureSettingIndex) {
+          case 0:
+            if (abs(loadPressure - newValue) > 0.05) {
+              loadPressure = newValue;
+              valueChanged = true;
+            }
+            break;
+          case 1:
+            if (abs(reloadPressure - newValue) > 0.05) {
+              reloadPressure = newValue;
+              valueChanged = true;
+            }
+            break;
+          case 2:
+            if (abs(hspPressure - newValue) > 0.05) {
+              hspPressure = newValue;
+              valueChanged = true;
+            }
+            break;
+        }
+      }
+
+      // Save values to EEPROM when Select is released
+      if (sel == HIGH && lastSelectState == LOW && adjusting && valueChanged) {
+        EEPROM.put(0, loadPressure);
+        EEPROM.put(sizeof(float), reloadPressure);
+        EEPROM.put(2 * sizeof(float), hspPressure);
+        valueChanged = false;
+        adjusting = false;
+        lastDebounce = now;
+      }
+
+      lcd.setCursor(0, 0);
+      lcd.print("  PRESSURE  ");
+      for (int i = 0; i < VISIBLE; i++) {
+        int idx = startIdx + i;
+        lcd.setCursor(-4, i + 1);
+        lcd.print(idx == pressureSettingIndex ? ">" : " ");
+        switch (idx) {
+          case 0:
+            lcd.print("Load : ");
+            lcd.print(loadPressure, 1);
+            lcd.print(" Bar  ");
+            break;
+          case 1:
+            lcd.print("Reload: ");
+            lcd.print(reloadPressure, 1);
+            lcd.print(" Bar   ");
+            break;
+          case 2:
+            lcd.print("HSP   : ");
+            lcd.print(hspPressure, 1);
+            lcd.print(" Bar   ");
             break;
         }
       }
@@ -275,6 +378,8 @@ void loop() {
       if (sel == LOW && lastSelectState == HIGH && now - lastDebounce > DEBOUNCE) {
         if (operatorIndex == 0) {
           inMachineMenu = true;
+        } else if (operatorIndex == 1) {
+          inPressureMenu = true;
         } else {
           inOperatorMenu = false;
         }
@@ -282,6 +387,7 @@ void loop() {
         lcd.clear();
       }
       lastSelectState = sel;
+
 
       lcd.setCursor(0, 0);
       lcd.print("  OPERATOR  ");
@@ -362,7 +468,7 @@ void loop() {
   lcd.setCursor(-4, 2);
   updateWarningMessage();
   lcd.print(currentWarning);
-  
+
   // lcd.print(faultDetected ? "Fault" : "No Fault");
   lcd.setCursor(6, 2);
   updateFaultMessage();
@@ -373,12 +479,12 @@ void loop() {
   lcd.print(currentStatus);
 
   lcd.setCursor(6, 3);
-  updateMessage1();
-  lcd.print(currentUpdate1);
+  // updateMessage1();
+  lcd.print(machineSettings.mode ? "L" : "R");
 
   lcd.setCursor(8, 3);
-  updateMessage2();
-  lcd.print(currentUpdate2);
+  // updateMessage2();
+  lcd.print(machineSettings.autoStart ? "A" : "-");
 
   delay(300);
 }
@@ -448,41 +554,48 @@ void updateStatusMessage() {
     currentStatus = "Ready";
   } else if (ready) {
     currentStatus = "Start Ack";
-  }  else {
+  } else {
     currentStatus = "Status";  // No warning
   }
 }
 
-void updateMessage1() {
-  if (local) {
-    currentUpdate1 = "L";
-  } else if (remote) {
-    currentUpdate1 = "R"; 
-  } else {
-    currentUpdate1 = "-";
-  }
-}
+// void updateMessage1() {
+//   if (local) {
+//     currentUpdate1 = "L";
+//   } else if (remote) {
+//     currentUpdate1 = "R";
+//   } else {
+//     currentUpdate1 = "-";
+//   }
+// }
 
-void updateMessage2() {
-  if (autoStart) {
-    currentUpdate2 = "A";
-  } else if (unloadMode) {
-    currentUpdate2 = "UL";  
-  }  else {
-    currentUpdate2 = "-";
-  }
-}
+// void updateMessage2() {
+//   if (autoStart) {
+//     currentUpdate2 = "A";
+//   } else if (unloadMode) {
+//     currentUpdate2 = "UL";
+//   }  else {
+//     currentUpdate2 = "-";
+//   }
+// }
+
 
 void saveMachineSettings() {
-  EEPROM.write(0, machineSettings.modeLeft ? 1 : 0);
+  EEPROM.write(0, machineSettings.mode ? 1 : 0);
   EEPROM.write(1, machineSettings.autoStart ? 1 : 0);
   EEPROM.write(2, machineSettings.pressureBar ? 1 : 0);
   EEPROM.write(3, machineSettings.tempCelsius ? 1 : 0);
 }
 
 void loadMachineSettings() {
-  machineSettings.modeLeft = EEPROM.read(0) == 1;
+  machineSettings.mode = EEPROM.read(0) == 1;
   machineSettings.autoStart = EEPROM.read(1) == 1;
   machineSettings.pressureBar = EEPROM.read(2) == 1;
   machineSettings.tempCelsius = EEPROM.read(3) == 1;
+}
+
+void savePressureSettings() {
+  EEPROM.put(0x30, loadPressure);
+  EEPROM.put(0x34, reloadPressure);
+  EEPROM.put(0x38, hspPressure);
 }
