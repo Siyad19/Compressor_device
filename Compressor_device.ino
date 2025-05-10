@@ -11,12 +11,15 @@ const int compressorPin = PA1;
 const int alarmPin = PB14;
 const int tempFaultPin = PA9;
 const int overloadFaultPin = PA10;
-const int manualStopPin = PA5;
+// const int manualStopPin = PA5;
 const int shutdownPin = PA6;
 const int resetPin = PA7;
 const int togglePin = PA2;
 const int nextPin = PA3;
 const int selectPin = PA4;
+const int fanSensorPin = PA11;
+const int backPin = PA5;  // previously manualStopPin
+
 
 // Screen states
 enum ScreenState { MAIN_SCREEN,
@@ -26,6 +29,8 @@ enum ScreenState { MAIN_SCREEN,
 ScreenState currentScreen = MAIN_SCREEN;
 bool inOperatorMenu = false;
 bool inMachineMenu = false;
+bool inTempMenu = false;
+
 
 bool inPressureMenu = false;
 int pressureSettingIndex = 0;
@@ -35,12 +40,18 @@ float loadPressure = 0.0;
 float reloadPressure = 0.0;
 float hspPressure = 0.0;
 
+const int TEMP_OPTIONS = 3;
+int tempSettingIndex = 0;
+float fanTemp = 0.0;    // From sensor
+float warnTemp = 60.0;  // Set via PA0
+float tripTemp = 80.0;  // Set via PA0
+
 // Menu data
 const int MENU_COUNT = 3;
 const char* menuItems[MENU_COUNT] = {
-  "1.Operator",
-  "2.Service ",
-  "3.Admin   "
+  "1.Operator   ",
+  "2.Service    ",
+  "3.Admin      "
 };
 
 int menuIndex = 0;
@@ -48,8 +59,8 @@ int menuIndex = 0;
 // Operator submenu
 const int OP_COUNT = 5;
 const char* operatorItems[OP_COUNT] = {
-  "1.Machine    ",
-  "2.Pressure   ",
+  "1.Machine      ",
+  "2.Pressure     ",
   "3.Temperature  ",
   "4.Maintenance  ",
   "5.Fault-Repair  "
@@ -88,7 +99,7 @@ bool lastNextState = HIGH;
 bool lastSelectState = HIGH;
 bool lastManualState = HIGH;
 
-bool warnTemp = false;
+bool warningTemp = false;
 bool changeOilFilter = false;
 bool changeAirFilter = false;
 bool changeOilSeparator = false;
@@ -133,12 +144,14 @@ void setup() {
   pinMode(potPin, INPUT);
   pinMode(tempFaultPin, INPUT_PULLUP);
   pinMode(overloadFaultPin, INPUT_PULLUP);
-  pinMode(manualStopPin, INPUT_PULLUP);
+  // pinMode(manualStopPin, INPUT_PULLUP);
   pinMode(shutdownPin, INPUT_PULLUP);
   pinMode(resetPin, INPUT_PULLUP);
   pinMode(togglePin, INPUT_PULLUP);
   pinMode(nextPin, INPUT_PULLUP);
   pinMode(selectPin, INPUT_PULLUP);
+  pinMode(backPin, INPUT_PULLUP);  // Previously manualStopPin
+
 
   pinMode(compressorPin, OUTPUT);
   pinMode(alarmPin, OUTPUT);
@@ -188,13 +201,13 @@ void loop() {
   if (systemShutdown) return;
 
   // Manual stop
-  bool m = digitalRead(manualStopPin);
-  if (m == LOW && lastManualState == HIGH && now - lastDebounce > DEBOUNCE) {
-    manuallyStopped = !manuallyStopped;
-    if (manuallyStopped) stopCompressor();
-    lastDebounce = now;
-  }
-  lastManualState = m;
+  // bool m = digitalRead(manualStopPin);
+  // if (m == LOW && lastManualState == HIGH && now - lastDebounce > DEBOUNCE) {
+  //   manuallyStopped = !manuallyStopped;
+  //   if (manuallyStopped) stopCompressor();
+  //   lastDebounce = now;
+  // }
+  // lastManualState = m;
 
   // Home/Menu toggle
   bool tog = digitalRead(togglePin);
@@ -241,6 +254,16 @@ void loop() {
         lastDebounce = now;
       }
       lastNextState = nxt;
+
+      bool back = digitalRead(backPin);
+      if (back == LOW && lastManualState == HIGH && now - lastDebounce > DEBOUNCE) {
+        inMachineMenu = false;  // Exit Machine submenu
+        inOperatorMenu = true;  // Return to Operator Menu (or MENU_SCREEN)
+        lastDebounce = now;
+        lcd.clear();
+      }
+      lastManualState = back;
+
 
       // Clear and print machine settings
       lcd.setCursor(0, 0);
@@ -298,6 +321,17 @@ void loop() {
         lastDebounce = now;
       }
       lastSelectState = sel;
+
+      bool back = digitalRead(backPin);
+      if (back == LOW && lastManualState == HIGH && now - lastDebounce > DEBOUNCE) {
+        inMachineMenu = false;  // Exit Machine submenu
+        inPressureMenu = false;
+        inOperatorMenu = true;  // Return to Operator Menu (or MENU_SCREEN)
+        lastDebounce = now;
+        lcd.clear();
+      }
+      lastManualState = back;
+
 
       // If adjusting, read potentiometer to update selected pressure setting
       if (adjusting) {
@@ -363,6 +397,107 @@ void loop() {
       return;
     }
 
+    if (inTempMenu) {
+      static const int VISIBLE = 3;
+      static int startIdx = 0;
+      static bool adjusting = false;     // Are we adjusting a value?
+      static bool valueChanged = false;  // Did the value actually change?
+
+      // Read buttons at the start
+      bool sel = digitalRead(selectPin);
+      bool nxt = digitalRead(nextPin);
+
+      unsigned long now = millis();  // Ensure you have `now` defined before using
+
+      // Handle Next button press to navigate (only when NOT adjusting)
+      if (!adjusting && nxt == LOW && lastNextState == HIGH && now - lastDebounce > DEBOUNCE) {
+        tempSettingIndex = (tempSettingIndex + 1) % TEMP_OPTIONS;
+        if (tempSettingIndex < startIdx) startIdx = tempSettingIndex;
+        if (tempSettingIndex >= startIdx + VISIBLE) startIdx = tempSettingIndex - VISIBLE + 1;
+        lastDebounce = now;
+      }
+      lastNextState = nxt;
+
+      // Handle Select button to toggle adjust mode
+      if (sel == LOW && lastSelectState == HIGH && now - lastDebounce > DEBOUNCE) {
+        // Only allow adjustment for index 0 and 1
+        if (tempSettingIndex < 2) adjusting = !adjusting;
+        lastDebounce = now;
+      }
+      lastSelectState = sel;
+
+      bool back = digitalRead(backPin);
+      if (back == LOW && lastManualState == HIGH && now - lastDebounce > DEBOUNCE) {
+        inMachineMenu = false;  // Exit Machine submenu
+        inPressureMenu = false;
+        inTempMenu = false;
+        inOperatorMenu = true;  // Return to Operator Menu (or MENU_SCREEN)
+        lastDebounce = now;
+        lcd.clear();
+      }
+      lastManualState = back;
+
+      // If adjusting, read potentiometer to update selected temperature setting
+      if (adjusting) {
+        int raw = analogRead(potPin);
+        float newValue = map(raw, 0, 1023, 0, 1000) / 10.0;
+
+
+        switch (tempSettingIndex) {
+          case 0:
+            if (abs(warnTemp - newValue) > 0.05) {
+              warnTemp = newValue;
+              valueChanged = true;
+            }
+            break;
+          case 1:
+            if (abs(tripTemp - newValue) > 0.05) {
+              tripTemp = newValue;
+              valueChanged = true;
+            }
+            break;
+        }
+      }
+
+      // Save values to EEPROM when Select is released
+      if (sel == HIGH && lastSelectState == LOW && adjusting && valueChanged) {
+        EEPROM.put(0, warnTemp);
+        EEPROM.put(sizeof(float), tripTemp);
+        valueChanged = false;
+        adjusting = false;
+        lastDebounce = now;
+      }
+
+      // Always read fan sensor
+      int rawFan = analogRead(fanSensorPin);
+      fanTemp = map(rawFan, 0, 4095, 0, 100) / 10.0;
+
+      lcd.setCursor(0, 0);
+      lcd.print(" TEMPERATURE ");
+      for (int i = 0; i < VISIBLE; i++) {
+        int idx = startIdx + i;
+        lcd.setCursor(-4, i + 1);
+        lcd.print(idx == tempSettingIndex ? ">" : " ");
+        switch (idx) {
+          case 0:
+            lcd.print("WarnTemp:");
+            lcd.print(warnTemp, 1);
+            lcd.print(" C ");
+            break;
+          case 1:
+            lcd.print("TripTemp:");
+            lcd.print(tripTemp, 1);
+            lcd.print(" C ");
+            break;
+          case 2:
+            lcd.print("FanTemp:");
+            lcd.print(fanTemp, 1);
+            lcd.print(" C ");
+            break;
+        }
+      }
+      return;
+    }
     // Operator submenu
     if (inOperatorMenu) {
       bool nxt = digitalRead(nextPin);
@@ -380,6 +515,8 @@ void loop() {
           inMachineMenu = true;
         } else if (operatorIndex == 1) {
           inPressureMenu = true;
+        } else if (operatorIndex == 2) {
+          inTempMenu = true;
         } else {
           inOperatorMenu = false;
         }
@@ -430,6 +567,9 @@ void loop() {
     }
     return;
   }
+
+
+
 
   // MAIN SCREEN logic
   // int pressureValue = analogRead(pressureSensorPin);
@@ -500,7 +640,7 @@ void restartCompressor() {
 }
 
 void updateWarningMessage() {
-  if (warnTemp) {
+  if (warningTemp) {
     currentWarning = "High Temp";
   } else if (changeOilFilter) {
     currentWarning = "Change Oil Filter";
@@ -520,7 +660,7 @@ void updateWarningMessage() {
 }
 
 void updateFaultMessage() {
-  if (warnTemp) {
+  if (warningTemp) {
     currentFault = "Emergency";
   } else if (emergency) {
     currentFault = "Rev Rotation";
@@ -538,7 +678,7 @@ void updateFaultMessage() {
 }
 
 void updateStatusMessage() {
-  if (warnTemp) {
+  if (warningTemp) {
     currentStatus = "Warm-time";
   } else if (warmTime) {
     currentStatus = "Star";
