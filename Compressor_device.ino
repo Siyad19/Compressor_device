@@ -30,6 +30,8 @@ ScreenState currentScreen = MAIN_SCREEN;
 bool inOperatorMenu = false;
 bool inMachineMenu = false;
 bool inTempMenu = false;
+bool inMaintenanceMenu = false;
+bool inFaultReportMenu = false;
 
 
 bool inPressureMenu = false;
@@ -63,7 +65,7 @@ const char* operatorItems[OP_COUNT] = {
   "2.Pressure     ",
   "3.Temperature  ",
   "4.Maintenance  ",
-  "5.Fault-Repair  "
+  "5.Fault-Report  "
 };
 
 int operatorIndex = 0;
@@ -133,6 +135,28 @@ String currentFault = "";
 String currentStatus = "";
 // String currentUpdate1 = "";
 // String currentUpdate2 = "";
+
+// Function declarations (prototypes)
+void loadMachineSettings();
+void saveMachineSettings();
+void stopCompressor();
+void updateWarningMessage();
+void updateFaultMessage();
+void updateStatusMessage();
+
+#define MAX_FAULTS 6  // Adjust this based on the number of fault types
+
+bool faultFlags[MAX_FAULTS] = { false, false, false, false, false, false };
+
+const char* faultMessages[MAX_FAULTS] = {
+  "High Temp",
+  "Low Pressure",
+  "High Pressure",
+  "Oil Change Needed",
+  "Filter Blocked",
+  "Voltage Error"
+};
+
 
 
 void setup() {
@@ -431,6 +455,8 @@ void loop() {
         inMachineMenu = false;  // Exit Machine submenu
         inPressureMenu = false;
         inTempMenu = false;
+        inMaintenanceMenu = false;
+        inFaultReportMenu = false;
         inOperatorMenu = true;  // Return to Operator Menu (or MENU_SCREEN)
         lastDebounce = now;
         lcd.clear();
@@ -498,6 +524,136 @@ void loop() {
       }
       return;
     }
+
+    if (inMaintenanceMenu) {
+      static const int VISIBLE = 3;
+      static int startIdx = 0;
+      static int maintenanceIndex = 0;
+      const int MAINTENANCE_OPTIONS = 6;
+
+      bool sel = digitalRead(selectPin);
+      bool nxt = digitalRead(nextPin);
+      unsigned long now = millis();
+
+      // Navigate through the list
+      if (nxt == LOW && lastNextState == HIGH && now - lastDebounce > DEBOUNCE) {
+        maintenanceIndex = (maintenanceIndex + 1) % MAINTENANCE_OPTIONS;
+        if (maintenanceIndex < startIdx) startIdx = maintenanceIndex;
+        if (maintenanceIndex >= startIdx + VISIBLE) startIdx = maintenanceIndex - VISIBLE + 1;
+        lastDebounce = now;
+      }
+      lastNextState = nxt;
+
+      bool back = digitalRead(backPin);
+      if (back == LOW && lastManualState == HIGH && now - lastDebounce > DEBOUNCE) {
+        inMachineMenu = false;  // Exit Machine submenu
+        inPressureMenu = false;
+        inTempMenu = false;
+        inMaintenanceMenu = false;
+        inFaultReportMenu = false;
+        inOperatorMenu = true;  // Return to Operator Menu (or MENU_SCREEN)
+        lastDebounce = now;
+        lcd.clear();
+      }
+      lastManualState = back;
+
+
+      // Display header
+      lcd.setCursor(0, 0);
+      lcd.print(" MAINTENANCE ");
+
+      // Display maintenance items
+      for (int i = 0; i < VISIBLE; i++) {
+        int idx = startIdx + i;
+        lcd.setCursor(-4, i + 1);
+        lcd.print(idx == maintenanceIndex ? ">" : " ");
+
+        switch (idx) {
+          case 0:
+            lcd.print("Oil Filt : ");
+            lcd.print(changeOilFilter ? "Yes" : "No ");
+            break;
+          case 1:
+            lcd.print("Oil Chng : ");
+            lcd.print(changeOil ? "Yes" : "No ");
+            break;
+          case 2:
+            lcd.print("Air Filt : ");
+            lcd.print(changeAirFilter ? "Yes" : "No ");
+            break;
+          case 3:
+            lcd.print("Regrease : ");
+            lcd.print(regreaseNeeded ? "Yes" : "No ");
+            break;
+          case 4:
+            lcd.print("Oil Sep  : ");
+            lcd.print(changeOilSeparator ? "Yes" : "No ");
+            break;
+          case 5:
+            lcd.print("Valve Kit: ");
+            lcd.print(changeValveKit ? "Yes" : "No ");
+            break;
+        }
+      }
+
+      return;
+    }
+    static bool firstTime = true;
+    if (inFaultReportMenu) {
+      static const int VISIBLE = 2;
+      static int startIdx = 0;
+      static int faultIndex = 0;
+
+      static bool lastNextState = HIGH;
+
+      // Count active faults
+      int activeCount = 0;
+      int activeIdx[MAX_FAULTS];
+      for (int i = 0; i < MAX_FAULTS; i++) {
+        if (faultFlags[i]) {
+          activeIdx[activeCount++] = i;
+        }
+      }
+
+      // Handle next button press
+      bool nxt = digitalRead(nextPin);
+      unsigned long now = millis();
+      if (nxt == LOW && lastNextState == HIGH && now - lastDebounce > DEBOUNCE) {
+        if (activeCount > 0) {
+          faultIndex = (faultIndex + 1) % activeCount;
+          if (faultIndex < startIdx) startIdx = faultIndex;
+          if (faultIndex >= startIdx + VISIBLE) startIdx = faultIndex - VISIBLE + 1;
+        }
+        firstTime = true;  // update display on button press
+        lastDebounce = now;
+      }
+      lastNextState = nxt;
+
+      // Only update display if something changed
+      if (firstTime) {
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print(" FAULT REPORT");
+
+        if (activeCount == 0) {
+          lcd.setCursor(0, 1);
+          lcd.print("No Faults Found");
+        } else {
+          for (int i = 0; i < VISIBLE; i++) {
+            int idx = startIdx + i;
+            if (idx >= activeCount) break;
+            lcd.setCursor(0, i + 1);
+            lcd.print(idx == faultIndex ? ">" : " ");
+            lcd.print(faultMessages[activeIdx[idx]]);
+          }
+        }
+
+        firstTime = false;  // prevent refresh on every loop
+      }
+
+      return;
+    }
+
     // Operator submenu
     if (inOperatorMenu) {
       bool nxt = digitalRead(nextPin);
@@ -517,6 +673,10 @@ void loop() {
           inPressureMenu = true;
         } else if (operatorIndex == 2) {
           inTempMenu = true;
+        } else if (operatorIndex == 3) {
+          inMaintenanceMenu = true;
+        } else if (operatorIndex == 4) {
+          inFaultReportMenu = true;
         } else {
           inOperatorMenu = false;
         }
