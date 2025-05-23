@@ -5,12 +5,12 @@
 LiquidCrystal_I2C lcd(0x27, 16, 4);
 
 // Pin definitions
-const int pressureSensorPin = PA8;
+const int pressureSensorPin = PA9;
 const int potPin = PA0;
 const int compressorPin = PA1;
 const int alarmPin = PB14;
-const int tempFaultPin = PA9;
-const int overloadFaultPin = PA10;
+const int tempSensorPin = PA8;
+// const int overloadFaultPin = PA10;
 const int shutdownPin = PA6;
 const int resetPin = PA7;
 const int togglePin = PA2;
@@ -29,9 +29,13 @@ ScreenState currentScreen = MAIN_SCREEN;
 
 bool inOperatorMenu = false;
 bool inServiceMenu = false;
+bool inAdminMenu = false;
 
 bool inMachineMenu = false;
 
+float resistanceToTempC(float resistance) {
+  return (resistance - 1000.0) / 3.85;
+}
 bool inTempMenu = false;
 const int TEMP_OPTIONS = 3;
 int tempSettingIndex = 0;
@@ -54,6 +58,8 @@ bool revRotation = false;
 bool highSumpPres = false;
 bool mainMotorOverload = false;
 bool fanMotorOverload = false;
+
+
 
 
 bool inPressureMenu = false;
@@ -90,10 +96,10 @@ const int OP_VISIBLE = 3;
 // Service submenu
 const int SR_COUNT = 4;
 const char* serviceItems[SR_COUNT] = {
-  "1.ServiceItem1  ",
-  "2.ServiceItem2  ",
-  "3.ServiceItem3  ",
-  "4.ServiceItem4  ",
+  "1.Cumulative   ",
+  "2.Delay        ",
+  "3.Drain value  ",
+  "4.Scheduled    ",
 };
 int serviceIndex = 0;
 int srStart = 0;
@@ -103,6 +109,28 @@ bool inServiceItem1 = false;
 bool inServiceItem2 = false;
 bool inServiceItem3 = false;
 bool inServiceItem4 = false;
+
+int adminIndex = 0;
+int adStart = 0;
+#define AD_VISIBLE 2  // Number of visible lines
+#define AD_COUNT 2    // Total admin menu items
+const char* adminItems[AD_COUNT] = {
+  "Option 1        ",
+  "Option 2        "
+};
+
+bool inAdminItem1 = false;
+bool inAdminItem2 = false;
+
+float rlValue = 0.0;
+float ulValue = 0.0;
+float lValue = 0.0;
+
+float ulPres = 0.0;
+float lPres = 0.0;
+int tempTrip = 0;
+int tempWarn = 0;
+
 
 // Machine options
 struct MachineSettings {
@@ -141,11 +169,14 @@ bool unload = false;
 bool stopBusy = false;
 bool ready = false;
 
+bool hasActiveFaults() {
+  return emergency || revRotation || highSumpPres || mainMotorOverload || fanMotorOverload;
+}
+
 
 String currentWarning = "";
 String currentFault = "";
 String currentStatus = "";
-
 
 
 // Function declarations (prototypes)
@@ -172,14 +203,19 @@ const char* faultMessages[MAX_FAULTS] = {
 
 
 void setup() {
+  // Load machine settings from EEPROM
+  EEPROM.begin();
+  loadMachineSettings();
+
+
   Wire.begin();
   lcd.init();
   lcd.backlight();
 
   pinMode(pressureSensorPin, INPUT);
   pinMode(potPin, INPUT);
-  pinMode(tempFaultPin, INPUT_PULLUP);
-  pinMode(overloadFaultPin, INPUT_PULLUP);
+  pinMode(tempSensorPin, INPUT);
+  // pinMode(overloadFaultPin, INPUT_PULLUP);
   // pinMode(manualStopPin, INPUT_PULLUP);
   pinMode(shutdownPin, INPUT_PULLUP);
   pinMode(resetPin, INPUT_PULLUP);
@@ -199,9 +235,6 @@ void setup() {
   lcd.print("Initializing...");
   delay(2000);
   lcd.clear();
-
-  // Load machine settings from EEPROM
-  loadMachineSettings();
 }
 
 void loop() {
@@ -244,6 +277,7 @@ void loop() {
       inOperatorMenu = false;
       inMachineMenu = false;
       inServiceMenu = false;
+      inAdminMenu = false;
 
     } else {
       currentScreen = MAIN_SCREEN;
@@ -612,33 +646,31 @@ void loop() {
 
       static bool lastNextState = HIGH;
       static bool lastBackState = HIGH;
-      static bool needsRedraw = true;  // Flag to redraw display on entering menu or after button press
+      static bool needsRedraw = true;
 
-      // Count active faults
+      // Temporary arrays for active faults
+      const char* activeFaults[10];  // enough to hold all possible faults
       int activeCount = 0;
-      int activeIdx[MAX_FAULTS];
-      for (int i = 0; i < MAX_FAULTS; i++) {
-        if (faultFlags[i]) {
-          activeIdx[activeCount++] = i;
-        }
-      }
+
+      // Build active fault list manually
+      if (emergency) activeFaults[activeCount++] = "Emergency";
+      if (revRotation) activeFaults[activeCount++] = "Rev Rotation";
+      if (highSumpPres) activeFaults[activeCount++] = "High sump pres";
+      if (mainMotorOverload) activeFaults[activeCount++] = "Main motor overload";
+      if (fanMotorOverload) activeFaults[activeCount++] = "Fan motor overload";
 
       unsigned long now = millis();
 
       // Handle back button
       bool back = digitalRead(backPin);
       if (back == LOW && lastBackState == HIGH && now - lastDebounce > DEBOUNCE) {
-        inMachineMenu = false;  // Exit other submenus if any
-        inPressureMenu = false;
-        inTempMenu = false;
-        inMaintenanceMenu = false;
         inFaultReportMenu = false;
-        inOperatorMenu = true;  // Go back to operator menu
+        inOperatorMenu = true;
         lastDebounce = now;
-        needsRedraw = true;  // Ensure menu redraw next time entered
+        needsRedraw = true;
         lcd.clear();
         lastBackState = back;
-        return;  // Exit here to avoid continuing in this menu
+        return;
       }
       lastBackState = back;
 
@@ -650,12 +682,12 @@ void loop() {
           if (faultIndex < startIdx) startIdx = faultIndex;
           if (faultIndex >= startIdx + VISIBLE) startIdx = faultIndex - VISIBLE + 1;
         }
-        needsRedraw = true;  // Redraw display after changing selection
+        needsRedraw = true;
         lastDebounce = now;
       }
       lastNextState = nxt;
 
-      // Redraw the LCD if needed
+      // Redraw screen
       if (needsRedraw) {
         lcd.clear();
         lcd.setCursor(0, 0);
@@ -670,7 +702,7 @@ void loop() {
             if (idx >= activeCount) break;
             lcd.setCursor(0, i + 1);
             lcd.print(idx == faultIndex ? ">" : " ");
-            lcd.print(faultMessages[activeIdx[idx]]);
+            lcd.print(activeFaults[idx]);
           }
         }
         needsRedraw = false;
@@ -678,6 +710,7 @@ void loop() {
 
       return;
     }
+
 
     // Operator submenu
     if (inOperatorMenu) {
@@ -709,6 +742,20 @@ void loop() {
         lcd.clear();
       }
       lastSelectState = sel;
+
+      bool back = digitalRead(backPin);
+      if (back == LOW && lastManualState == HIGH && (now - lastDebounce > DEBOUNCE)) {
+        inMachineMenu = false;
+        inPressureMenu = false;
+        inTempMenu = false;
+        inMaintenanceMenu = false;
+        inFaultReportMenu = false;
+        inOperatorMenu = false;
+        currentScreen == MENU_SCREEN;
+        lcd.clear();
+        lastDebounce = now;
+      }
+      lastManualState = back;
 
 
       lcd.setCursor(0, 0);
@@ -751,10 +798,12 @@ void loop() {
       lastManualState = back;
 
       // Simulated values (replace with real sensor/EEPROM values)
-      int stSpHrs = 99;
-      int runTime = 9999;
-      int loadTime = 9999;
-      int unloadTime = 9999;
+      int stSpHrs = 0;
+      int runTime = 0;
+      int loadTime = 0;
+      int unloadTime = 0;
+
+      char buffer[6];  // for 0000 + h + null terminator
 
       for (int i = 0; i < VISIBLE; i++) {
         int idx = serviceStart + i;
@@ -763,24 +812,30 @@ void loop() {
         switch (idx) {
           case 0:
             lcd.print("St/Sp Hrs: ");
-            lcd.print(stSpHrs);
+            sprintf(buffer, "%04d", stSpHrs);
+            lcd.print(buffer);
             break;
           case 1:
             lcd.print("Runtime  : ");
-            lcd.print(runTime);
+            sprintf(buffer, "%04d", runTime);
+            lcd.print(buffer);
             break;
           case 2:
             lcd.print("Load     : ");
-            lcd.print(loadTime);
+            sprintf(buffer, "%04d", loadTime);
+            lcd.print(buffer);
             break;
           case 3:
             lcd.print("Unload   : ");
-            lcd.print(unloadTime);
+            sprintf(buffer, "%04d", unloadTime);
+            lcd.print(buffer);
             break;
         }
       }
+
       return;
     }
+
 
     if (inServiceItem2) {
       static const int VISIBLE = 4;
@@ -901,6 +956,72 @@ void loop() {
       return;
     }
 
+    if (inServiceItem4) {
+      static int serviceIndex = 0;
+      static int serviceStart = 0;
+      static const int VISIBLE = 4;
+      const int SERVICE_COUNT = 6;
+
+      unsigned long now = millis();
+      unsigned long runTimeMillis = now;  // since boot
+      float runTimeHours = runTimeMillis / 3600000.0;
+
+      // Read navigation buttons
+      bool sel = digitalRead(selectPin);
+      bool nxt = digitalRead(nextPin);
+
+      // Navigation with next button
+      if (nxt == LOW && lastNextState == HIGH && now - lastDebounce > DEBOUNCE) {
+        serviceIndex = (serviceIndex + 1) % SERVICE_COUNT;
+        if (serviceIndex < serviceStart) serviceStart = serviceIndex;
+        if (serviceIndex >= serviceStart + VISIBLE) serviceStart = serviceIndex - VISIBLE + 1;
+        lastDebounce = now;
+      }
+      lastNextState = nxt;
+
+      // Back button to return to menu
+      bool back = digitalRead(backPin);
+      if (back == LOW && lastManualState == HIGH && now - lastDebounce > DEBOUNCE) {
+        inServiceItem4 = false;
+        currentScreen = MENU_SCREEN;
+        lcd.clear();
+        lastDebounce = now;
+      }
+      lastManualState = back;
+
+      // Only refresh display every 500ms to reduce flicker
+      static unsigned long lastDisplayUpdate = 0;
+      if (now - lastDisplayUpdate > 500) {
+        lastDisplayUpdate = now;
+
+        for (int i = 0; i < VISIBLE; i++) {
+          int idx = serviceStart + i;
+          if (idx >= SERVICE_COUNT) break;
+
+          lcd.setCursor(-4, i);
+          lcd.print(idx == serviceIndex ? ">" : " ");
+
+          switch (idx) {
+            case 0: lcd.print("Oil Filt :"); break;
+            case 1: lcd.print("Air Filt :"); break;
+            case 2: lcd.print("Oil Septr:"); break;
+            case 3: lcd.print("Oil Chnge:"); break;
+            case 4: lcd.print("Regrease :"); break;
+            case 5: lcd.print("Valve Kit:"); break;
+          }
+
+          // Format and print hours in 0000h format
+          char buffer[6];  // 4 digits + 'h' + null terminator
+          int hours = (int)runTimeHours;
+          sprintf(buffer, "%04d", hours);
+          lcd.print(buffer);
+          lcd.print("   ");  // to clear any leftover chars
+        }
+      }
+
+      return;
+    }
+
 
     // Service submenu
     if (inServiceMenu) {
@@ -935,7 +1056,11 @@ void loop() {
       bool back = digitalRead(backPin);
       if (back == LOW && lastManualState == HIGH && (now - lastDebounce > DEBOUNCE)) {
         inServiceItem1 = false;
-        currentScreen = MENU_SCREEN;
+        inServiceItem2 = false;
+        inServiceItem3 = false;
+        inServiceItem4 = false;
+        inServiceMenu = false;
+        currentScreen == MENU_SCREEN;
         lcd.clear();
         lastDebounce = now;
       }
@@ -951,6 +1076,293 @@ void loop() {
       }
       return;
     }
+
+    if (inAdminItem1) {
+      const int OPTION_COUNT = 4;
+      const int VISIBLE_LINES = 4;
+
+      static int optionIndex = 0;
+      static int optionStart = 0;
+      static bool adjusting = false;
+      static bool valueChanged = false;
+
+      bool nxt = digitalRead(nextPin);
+      unsigned long now = millis();
+
+      // Handle NEXT button for scrolling and selection
+      if (nxt == LOW && lastNextState == HIGH && now - lastDebounce > DEBOUNCE) {
+        optionIndex = (optionIndex + 1) % OPTION_COUNT;
+
+        // Scroll if needed
+        if (optionIndex >= optionStart + VISIBLE_LINES)
+          optionStart = optionIndex - VISIBLE_LINES + 1;
+        else if (optionIndex < optionStart)
+          optionStart = optionIndex;
+
+        lastDebounce = now;
+      }
+      lastNextState = nxt;
+
+      // Handle SELECT button
+      bool sel = digitalRead(selectPin);
+      if (sel == LOW && lastSelectState == HIGH && now - lastDebounce > DEBOUNCE) {
+        adjusting = !adjusting;
+        lastDebounce = now;
+      }
+      lastSelectState = sel;
+
+      // Handle BACK button
+      bool back = digitalRead(backPin);
+      if (back == LOW && lastManualState == HIGH && now - lastDebounce > DEBOUNCE) {
+        inAdminItem1 = false;
+        currentScreen = MENU_SCREEN;
+        lcd.clear();
+        lastDebounce = now;
+      }
+      lastManualState = back;
+
+      // Adjust values using potentiometer
+      if (adjusting) {
+        int raw = analogRead(potPin);
+        switch (optionIndex) {
+          case 0:
+            {
+              float newVal = map(raw, 0, 1023, 0, 2000) / 10.0;
+              if (ulPres != newVal) {
+                ulPres = newVal;
+                valueChanged = true;
+              }
+              break;
+            }
+          case 1:
+            {
+              float newVal = map(raw, 0, 1023, 0, 2000) / 10.0;
+              if (lPres != newVal) {
+                lPres = newVal;
+                valueChanged = true;
+              }
+              break;
+            }
+          case 2:
+            {
+              int newVal = map(raw, 0, 1023, 0, 150);
+              if (tempTrip != newVal) {
+                tempTrip = newVal;
+                valueChanged = true;
+              }
+              break;
+            }
+          case 3:
+            {
+              int newVal = map(raw, 0, 1023, 0, 150);
+              if (tempWarn != newVal) {
+                tempWarn = newVal;
+                valueChanged = true;
+              }
+              break;
+            }
+        }
+      }
+
+      // Display options (4 lines)
+      for (int i = 0; i < VISIBLE_LINES; i++) {
+        int idx = optionStart + i;
+        lcd.setCursor(-4, i);
+        lcd.print(idx == optionIndex ? ">" : " ");
+        switch (idx) {
+          case 0:
+            lcd.print("UL pres: ");
+            lcd.print(ulPres, 1);
+            lcd.print(" B");
+            break;
+          case 1:
+            lcd.print("L pres : ");
+            lcd.print(lPres, 1);
+            lcd.print(" B");
+            break;
+          case 2:
+            lcd.print("Trip   : ");
+            lcd.print(tempTrip);
+            lcd.print(" C");
+            break;
+          case 3:
+            lcd.print("Warn   : ");
+            lcd.print(tempWarn);
+            lcd.print(" C");
+            break;
+        }
+      }
+
+      // Save to EEPROM when adjusting stops
+      if (sel == HIGH && lastSelectState == LOW && adjusting && valueChanged) {
+        EEPROM.put(200, ulPres);
+        EEPROM.put(204, lPres);
+        EEPROM.put(208, tempTrip);
+        EEPROM.put(212, tempWarn);
+        adjusting = false;
+        valueChanged = false;
+        lastDebounce = now;
+      }
+
+      return;
+    }
+
+    if (inAdminItem2) {
+      const int OPTION_COUNT = 3;
+      const int VISIBLE_LINES = 3;
+
+      static int optionIndex = 0;
+      static int optionStart = 0;
+      static bool adjusting = false;
+      static bool valueChanged = false;
+
+      bool nxt = digitalRead(nextPin);
+      unsigned long now = millis();
+
+      // Handle NEXT button
+      if (nxt == LOW && lastNextState == HIGH && now - lastDebounce > DEBOUNCE) {
+        optionIndex = (optionIndex + 1) % OPTION_COUNT;
+
+        if (optionIndex >= optionStart + VISIBLE_LINES)
+          optionStart = optionIndex - VISIBLE_LINES + 1;
+        else if (optionIndex < optionStart)
+          optionStart = optionIndex;
+
+        lastDebounce = now;
+      }
+      lastNextState = nxt;
+
+      // Handle SELECT button
+      bool sel = digitalRead(selectPin);
+      if (sel == LOW && lastSelectState == HIGH && now - lastDebounce > DEBOUNCE) {
+        adjusting = !adjusting;
+        lastDebounce = now;
+      }
+      lastSelectState = sel;
+
+      // Handle BACK button
+      bool back = digitalRead(backPin);
+      if (back == LOW && lastManualState == HIGH && now - lastDebounce > DEBOUNCE) {
+        inAdminItem2 = false;
+        currentScreen = MENU_SCREEN;
+        lcd.clear();
+        lastDebounce = now;
+      }
+      lastManualState = back;
+
+      // Adjust values with potentiometer
+      if (adjusting) {
+        int raw = analogRead(potPin);
+        float newVal = map(raw, 0, 1023, 0, 10000) / 10.0;  // 0000.0 to 1000.0
+
+        switch (optionIndex) {
+          case 0:
+            if (rlValue != newVal) {
+              rlValue = newVal;
+              valueChanged = true;
+            }
+            break;
+          case 1:
+            if (ulValue != newVal) {
+              ulValue = newVal;
+              valueChanged = true;
+            }
+            break;
+          case 2:
+            if (lValue != newVal) {
+              lValue = newVal;
+              valueChanged = true;
+            }
+            break;
+        }
+      }
+
+      // Display 3 options
+      for (int i = 0; i < VISIBLE_LINES; i++) {
+        int idx = optionStart + i;
+        lcd.setCursor(-4, i);
+        lcd.print(idx == optionIndex ? ">" : " ");
+        switch (idx) {
+          case 0:
+            lcd.print("RL : ");
+            lcd.print(rlValue, 1);
+            break;
+          case 1:
+            lcd.print("UL : ");
+            lcd.print(ulValue, 1);
+            break;
+          case 2:
+            lcd.print("L  : ");
+            lcd.print(lValue, 1);
+            break;
+        }
+      }
+
+      // Save to EEPROM
+      if (sel == HIGH && lastSelectState == LOW && adjusting && valueChanged) {
+        EEPROM.put(220, rlValue);
+        EEPROM.put(224, ulValue);
+        EEPROM.put(228, lValue);
+        adjusting = false;
+        valueChanged = false;
+        lastDebounce = now;
+      }
+
+      return;
+    }
+
+
+
+
+    // Admin submenu
+    if (inAdminMenu) {
+      bool nxt = digitalRead(nextPin);
+      if (nxt == LOW && lastNextState == HIGH && now - lastDebounce > DEBOUNCE) {
+        adminIndex = (adminIndex + 1) % AD_COUNT;
+        if (adminIndex < adStart) adStart = adminIndex;
+        if (adminIndex >= adStart + AD_VISIBLE) adStart = adminIndex - AD_VISIBLE + 1;
+        lastDebounce = now;
+      }
+      lastNextState = nxt;
+
+      bool sel = digitalRead(selectPin);
+      if (sel == LOW && lastSelectState == HIGH && now - lastDebounce > DEBOUNCE) {
+        if (adminIndex == 0) {
+          inAdminItem1 = true;  // Add your action here
+        } else if (adminIndex == 1) {
+          inAdminItem2 = true;  // Add your action here
+        } else {
+          inAdminMenu = false;
+        }
+        lastDebounce = now;
+        lcd.clear();
+      }
+      lastSelectState = sel;
+
+      bool back = digitalRead(backPin);
+      if (back == LOW && lastManualState == HIGH && (now - lastDebounce > DEBOUNCE)) {
+        inAdminItem1 = false;
+        inAdminItem2 = false;
+        inAdminMenu = false;
+        currentScreen == MENU_SCREEN;
+        lcd.clear();
+        lastDebounce = now;
+      }
+      lastManualState = back;
+
+      lcd.setCursor(0, 0);
+      lcd.print("    ADMIN      ");
+      for (int i = 0; i < AD_VISIBLE; i++) {
+        int idx = adStart + i;
+        lcd.setCursor(-4, 1 + i);
+        lcd.print(idx == adminIndex ? ">" : " ");
+        lcd.print(adminItems[idx]);
+      }
+      lcd.setCursor(-4, 3);
+      lcd.print("                 ");
+      return;
+    }
+
 
     // Main menu
     bool nxt = digitalRead(nextPin);
@@ -968,6 +1380,9 @@ void loop() {
       } else if (menuIndex == 1) {
         inServiceMenu = true;
         serviceIndex = srStart = 0;
+      } else if (menuIndex == 2) {
+        inAdminMenu = true;
+        adminIndex = adStart = 0;
       } else {
         currentScreen = MAIN_SCREEN;
       }
@@ -990,11 +1405,43 @@ void loop() {
   // Draw Home screen
   lcd.setCursor(0, 0);
   lcd.print("Dis.Prs:");
-  lcd.print(machineSettings.pressureBar ? "00.0 Bar" : "00.0 PSI");
+
+  int rawValue = analogRead(pressureSensorPin);                    //  Read analog value from the pressure sensor pin
+  float voltage = (rawValue / 1023.0) * 5.0;                       // Convert raw analog value to voltage (assuming 10-bit ADC and 5V reference)
+  float current_mA = (voltage / 5.0) * 20.0;                       // convert voltage to current (mA)
+  current_mA = constrain(current_mA, 4.0, 20.0);                   // clamp current between 4 and 20 mA
+  float pressureBar = ((current_mA - 4.0) * 10.0) / (20.0 - 4.0);  // Calculate pressure in Bar (example: 0 Bar = 4 mA, 10 Bar = 20 mA)
+  float pressurePSI = pressureBar * 14.5038;                       // Convert pressure to PSI if needed (1 Bar = 14.5038 PSI)
+  // Display pressure value with one decimal place and units
+  if (machineSettings.pressureBar) {
+    lcd.print(pressureBar, 1);  // show 1 decimal place
+    lcd.print(" Bar ");
+  } else {
+    lcd.print(pressurePSI, 1);
+    lcd.print(" PSI ");
+  }
+
+  int rawValueTemp = analogRead(tempSensorPin);
+  float voltageTemp = (rawValueTemp / 4095.0) * 3.3;
+  float R_REF = 1000.0;
+  float Vsupply = 3.3;
+  if (voltageTemp >= Vsupply) voltageTemp = Vsupply - 0.01;
+  float R_sensor = R_REF * (voltageTemp / (Vsupply - voltageTemp));
+  float tempC = resistanceToTempC(R_sensor);
+  float tempF = tempC * 9.0 / 5.0 + 32.0;
+  // Clamp to zero as lowest range
+  if (tempC < 0) tempC = 0;
+  if (tempF < 32) tempF = 32;
 
   lcd.setCursor(0, 1);
   lcd.print("Dis.Temp:");
-  lcd.print(machineSettings.tempCelsius ? "0 C" : "0 F");
+  if (machineSettings.tempCelsius) {
+    lcd.print(tempC, 1);
+    lcd.print(" C");
+  } else {
+    lcd.print(tempF, 1);
+    lcd.print(" F");
+  }
 
   lcd.setCursor(-4, 2);
   updateWarningMessage();
@@ -1046,7 +1493,7 @@ void updateWarningMessage() {
   } else if (changeOil) {
     currentWarning = "Change Oil";
   } else {
-    currentWarning = "Warning";  // No warning
+    currentWarning = "-";  // No warning
   }
 }
 
@@ -1064,12 +1511,16 @@ void updateFaultMessage() {
   } else if (fanMotorOverload) {
     currentFault = "Trip";
   } else {
-    currentFault = "Fault";  // No warning
+    currentFault = "-";  // No warning
   }
 }
 
 void updateStatusMessage() {
-  if (warningTemp) {
+  if (inFaultReportMenu && hasActiveFaults()) {
+    currentStatus = "Fault";
+  } else if (inFaultReportMenu && !hasActiveFaults()) {
+    currentStatus = "Ready";
+  } else if (warningTemp) {
     currentStatus = "Warm-time";
   } else if (warmTime) {
     currentStatus = "Star";
@@ -1086,10 +1537,9 @@ void updateStatusMessage() {
   } else if (ready) {
     currentStatus = "Start Ack";
   } else {
-    currentStatus = "Status";  // No warning
+    currentStatus = "Ready";
   }
 }
-
 // void updateMessage1() {
 //   if (local) {
 //     currentUpdate1 = "L";
@@ -1110,12 +1560,12 @@ void updateStatusMessage() {
 //   }
 // }
 
-
 void saveMachineSettings() {
   EEPROM.write(0, machineSettings.mode ? 1 : 0);
   EEPROM.write(1, machineSettings.autoStart ? 1 : 0);
   EEPROM.write(2, machineSettings.pressureBar ? 1 : 0);
   EEPROM.write(3, machineSettings.tempCelsius ? 1 : 0);
+  // NO EEPROM.commit() here
 }
 
 void loadMachineSettings() {
